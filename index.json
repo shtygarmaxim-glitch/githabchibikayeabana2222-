@@ -1,0 +1,249 @@
+import express from 'express';
+import http from 'http';
+import path from 'path';
+import cors from 'cors';
+import crypto from 'crypto';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { WebSocketServer, WebSocket } from 'ws';
+import { PrismaClient, Prisma } from '@prisma/client';
+
+dotenv.config();
+const prisma = new PrismaClient();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server, path: '/ws/rocket' });
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Безопасный кошелек
+class Wallet {
+  static async deduct(userId, amount, type) {
+    return await prisma.$transaction(async (tx) => {
+      const u = await tx.user.findUnique({ where: { id: userId } });
+      if (!u || Number(u.balance) < amount) throw new Error('Недостаточно средств');
+      const updated = await tx.user.update({
+        where: { id: userId },
+        data: { balance: { decrement: new Prisma.Decimal(amount) } }
+      });
+      await tx.transaction.create({ data: { userId, amount: new Prisma.Decimal(-amount), type } });
+      return Number(updated.balance);
+    });
+  }
+
+  static async credit(userId, amount, type) {
+    return await prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({
+        where: { id: userId },
+        data: { balance: { increment: new Prisma.Decimal(amount) } }
+      });
+      await tx.transaction.create({ data: { userId, amount: new Prisma.Decimal(amount), type } });
+      return Number(updated.balance);
+    });
+  }
+}
+
+// Авторизация Telegram HMAC
+function auth(req, res, next) {
+  const initData = req.headers['x-telegram-init-data'];
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+
+  if (!initData || !botToken) {
+    req.tgUser = { id: '777000', first_name: 'DevPlayer', username: 'player' };
+    return next();
+  }
+
+  try {
+    const params = new URLSearchParams(initData);
+    const hash = params.get('hash');
+    params.delete('hash');
+
+    const arr = [];
+    params.sort();
+    for (const [k, v] of params.entries()) arr.push(`\({k}=\){v}`);
+
+    const secret = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+    const checkHash = crypto.createHmac('sha256', secret).update(arr.join('\n')).digest('hex');
+
+    if (checkHash !== hash && process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'Auth failed' });
+    }
+    req.tgUser = JSON.parse(params.get('user') || '{}');
+    next();
+  } catch (e) {
+    req.tgUser = { id: '777000', first_name: 'Player', username: 'player' };
+    next();
+  }
+}
+
+// Crash Rocket Engine
+let rocket = { status: 'WAITING', multiplier: 1.0, roundId: '', crashPoint: 1.0 };
+let activeBets = new Map();
+
+function broadcast(event, data) {
+  const msg = JSON.stringify({ event, data });
+  wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); });
+}
+
+async function runRocket() {
+  rocket.status = 'WAITING';
+  rocket.multiplier = 1.0;
+  activeBets.clear();
+
+  const r = Math.random();
+  rocket.crashPoint = r < 0.04 ? 1.0 : Math.floor((0.96 / (1 - r)) * 100) / 100;
+
+  try {
+    const round = await prisma.crashRound.create({
+      data: { crashPoint: rocket.crashPoint, hash: crypto.randomBytes(8).toString('hex') }
+    });
+    rocket.roundId = round.id;
+  } catch (e) {}
+
+  broadcast('ROUND_WAITING', { roundId: rocket.roundId });
+
+  setTimeout(() => {
+    rocket.status = 'FLYING';
+    const start = Date.now();
+    const timer = setInterval(async () => {
+      const sec = (Date.now() - start) / 1000;
+      rocket.multiplier = Math.floor(Math.pow(Math.E, 0.08 * sec) * 100) / 100;
+
+      if (rocket.multiplier >= rocket.crashPoint) {
+        clearInterval(timer);
+        rocket.status = 'CRASHED';
+        broadcast('ROUND_CRASHED', { multiplier: rocket.crashPoint });
+        try {
+          await prisma.crashRound.update({ where: { id: rocket.roundId }, data: { isFinished: true } });
+        } catch (e) {}
+        setTimeout(runRocket, 4000);
+      } else {
+        broadcast('TICK', { multiplier: rocket.multiplier });
+      }
+    }, 100);
+  }, 5000);
+}
+
+runRocket();
+
+wss.on('connection', ws => ws.send(JSON.stringify({ event: 'INIT', data: rocket })));
+
+// API
+app.post('/api/auth/sync', auth, async (req, res) => {
+  const u = await prisma.user.upsert({
+    where: { telegramId: String(req.tgUser.id) },
+    update: { firstName: req.tgUser.first_name, username: req.tgUser.username },
+    create: { telegramId: String(req.tgUser.id), firstName: req.tgUser.first_name, username: req.tgUser.username }
+  });
+  res.json({ user: u });
+});
+
+app.get('/api/user/me', auth, async (req, res) => {
+  const u = await prisma.user.findUnique({
+    where: { telegramId: String(req.tgUser.id) },
+    include: { transactions: { take: 20, orderBy: { createdAt: 'desc' } } }
+  });
+  res.json(u);
+});
+
+// Mines
+app.post('/api/games/mines/start', auth, async (req, res) => {
+  try {
+    const { bet, minesCount } = req.body;
+    const u = await prisma.user.findUnique({ where: { telegramId: String(req.tgUser.id) } });
+    await Wallet.deduct(u.id, Number(bet), 'BET_MINES');
+
+    const field = Array(25).fill(false);
+    let p = 0;
+    while (p < minesCount) {
+      const idx = Math.floor(Math.random() * 25);
+      if (!field[idx]) { field[idx] = true; p++; }
+    }
+
+    const s = await prisma.gameSession.create({
+      data: {
+        userId: u.id,
+        game: 'MINES',
+        bet: Number(bet),
+        multiplier: 1.0,
+        stateData: { mines: field, revealed: [], minesCount: Number(minesCount) }
+      }
+    });
+    res.json({ sessionId: s.id });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/games/mines/reveal', auth, async (req, res) => {
+  try {
+    const { sessionId, cellIndex } = req.body;
+    const s = await prisma.gameSession.findUnique({ where: { id: sessionId } });
+    const st = s.stateData;
+
+    if (st.mines[cellIndex]) {
+      await prisma.gameSession.update({ where: { id: sessionId }, data: { status: 'LOST' } });
+      return res.json({ status: 'BOOM', mines: st.mines });
+    }
+
+    st.revealed.push(cellIndex);
+    let mult = 1.0;
+    for (let i = 0; i < st.revealed.length; i++) mult *= (25 - i) / (25 - st.minesCount - i);
+    const m = Math.floor(mult * 0.96 * 100) / 100;
+
+    await prisma.gameSession.update({ where: { id: sessionId }, data: { multiplier: m, stateData: st } });
+    res.json({ status: 'SAFE', multiplier: m });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/games/mines/cashout', auth, async (req, res) => {
+  try {
+    const s = await prisma.gameSession.findUnique({ where: { id: req.body.sessionId } });
+    const payout = Math.floor(Number(s.bet) * Number(s.multiplier) * 100) / 100;
+    await prisma.gameSession.update({ where: { id: s.id }, data: { status: 'CASHED_OUT', payout } });
+    const newBal = await Wallet.credit(s.userId, payout, 'WIN_MINES');
+    res.json({ newBalance: newBal, mines: s.stateData.mines, payout });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Rocket Bet/Cashout
+app.post('/api/games/rocket/bet', auth, async (req, res) => {
+  try {
+    if (rocket.status !== 'WAITING') throw new Error('Раунд уже начался');
+    const u = await prisma.user.findUnique({ where: { telegramId: String(req.tgUser.id) } });
+    const bal = await Wallet.deduct(u.id, Number(req.body.amount), 'BET_ROCKET');
+    activeBets.set(u.id, { amount: Number(req.body.amount) });
+    res.json({ success: true, balance: bal });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/games/rocket/cashout', auth, async (req, res) => {
+  try {
+    if (rocket.status !== 'FLYING') throw new Error('Не в полете');
+    const u = await prisma.user.findUnique({ where: { telegramId: String(req.tgUser.id) } });
+    const b = activeBets.get(u.id);
+    if (!b) throw new Error('Ставка не найдена');
+
+    const payout = Math.floor(b.amount * rocket.multiplier * 100) / 100;
+    activeBets.delete(u.id);
+    const bal = await Wallet.credit(u.id, payout, 'WIN_ROCKET');
+    res.json({ payout, newBalance: bal, multiplier: rocket.multiplier });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public/index.html')));
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Server started on port ${PORT}`));
