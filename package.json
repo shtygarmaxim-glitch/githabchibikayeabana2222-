@@ -1,14 +1,10 @@
-﻿{
+{
   "name": "tma-gaming-platform",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "postinstall": "cd client && npm install",
-    "build:client": "cd client && npm run build",
-    "build:server": "tsc -p server/tsconfig.json",
-    "build": "npx prisma generate && npm run build:server && npm run build:client",
-    "start": "node server/dist/index.js",
-    "dev": "node --watch server/src/index.ts"
+    "build": "npx prisma generate && tsc -p server/tsconfig.json && cd client && npm install && npm run build",
+    "start": "node server/dist/index.js"
   },
   "dependencies": {
     "@prisma/client": "^5.19.1",
