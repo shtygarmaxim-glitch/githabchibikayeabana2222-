@@ -7,63 +7,17 @@ generator client {
   provider = "prisma-client-js"
 }
 
-enum Role {
-  USER
-  ADMIN
-}
-
-enum TxType {
-  DEPOSIT
-  WITHDRAW
-  BET
-  WIN
-  CASE_OPEN
-  ITEM_SELL
-  ADMIN_ADJUST
-}
-
-enum GameType {
-  MINES
-  ROCKET
-  UPGRADE
-  CHICKEN_ROAD
-  ICE_ARENA
-  CASES
-}
-
-enum GameStatus {
-  ACTIVE
-  WON
-  LOST
-  CASHED_OUT
-}
-
-enum ItemRarity {
-  COMMON
-  UNCOMMON
-  RARE
-  EPIC
-  LEGENDARY
-}
-
 model User {
-  id           String          @id @default(uuid())
-  telegramId   String          @unique
+  id           String        @id @default(uuid())
+  telegramId   String        @unique
   username     String?
   firstName    String?
-  avatarUrl    String?
-  balance      Decimal         @default(0.00) @db.Decimal(12, 2)
-  role         Role            @default(USER)
-  isBlocked    Boolean         @default(false)
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  balance      Decimal       @default(1000.00) @db.Decimal(12, 2)
+  createdAt    DateTime      @default(now())
 
   transactions Transaction[]
-  inventory    InventoryItem[]
   gameSessions GameSession[]
   crashBets    CrashBet[]
-
-  @@index([telegramId])
 }
 
 model Transaction {
@@ -71,97 +25,42 @@ model Transaction {
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   amount    Decimal  @db.Decimal(12, 2)
-  type      TxType
-  details   Json?
+  type      String
   createdAt DateTime @default(now())
-
-  @@index([userId])
-}
-
-model Item {
-  id        String          @id @default(uuid())
-  name      String
-  image     String
-  price     Decimal         @db.Decimal(12, 2)
-  rarity    ItemRarity      @default(COMMON)
-  isNft     Boolean         @default(false)
-  createdAt DateTime        @default(now())
-
-  inventory InventoryItem[]
-  caseItems CaseItem[]
-}
-
-model InventoryItem {
-  id        String   @id @default(uuid())
-  userId    String
-  itemId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  item      Item     @relation(fields: [itemId], references: [id])
-  isLocked  Boolean  @default(false)
-  createdAt DateTime @default(now())
-
-  @@index([userId])
 }
 
 model GameSession {
-  id         String     @id @default(uuid())
+  id         String   @id @default(uuid())
   userId     String
-  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  game       GameType
-  bet        Decimal    @db.Decimal(12, 2)
-  multiplier Decimal?   @db.Decimal(8, 2)
-  payout     Decimal?   @db.Decimal(12, 2)
-  status     GameStatus @default(ACTIVE)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  game       String
+  bet        Decimal  @db.Decimal(12, 2)
+  multiplier Decimal? @db.Decimal(8, 2)
+  payout     Decimal? @db.Decimal(12, 2)
+  status     String   @default("ACTIVE")
   stateData  Json
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
-
-  @@index([userId, game])
+  createdAt  DateTime @default(now())
 }
 
 model CrashRound {
   id         String     @id @default(uuid())
   crashPoint Decimal    @db.Decimal(8, 2)
   hash       String
-  seed       String
   isFinished Boolean    @default(false)
   startedAt  DateTime   @default(now())
-  finishedAt DateTime?
 
   bets       CrashBet[]
 }
 
 model CrashBet {
-  id         String     @id @default(uuid())
-  roundId    String
-  userId     String
-  amount     Decimal    @db.Decimal(12, 2)
-  cashout    Decimal?   @db.Decimal(8, 2)
-  payout     Decimal?   @db.Decimal(12, 2)
-  isWon      Boolean    @default(false)
-  createdAt  DateTime   @default(now())
-
-  round      CrashRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
-  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([roundId])
-}
-
-model Case {
   id        String     @id @default(uuid())
-  name      String
-  slug      String     @unique
-  image     String
-  price     Decimal    @db.Decimal(12, 2)
-  isActive  Boolean    @default(true)
-  items     CaseItem[]
-}
+  roundId   String
+  userId    String
+  amount    Decimal    @db.Decimal(12, 2)
+  cashout   Decimal?   @db.Decimal(8, 2)
+  payout    Decimal?   @db.Decimal(12, 2)
+  isWon     Boolean    @default(false)
 
-model CaseItem {
-  id       String  @id @default(uuid())
-  caseId   String
-  itemId   String
-  chance   Float
-  case     Case    @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  item     Item    @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  round     CrashRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
